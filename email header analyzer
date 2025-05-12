@@ -1,0 +1,92 @@
+# CloudMailTrace - Email Header Analyzer (Flask Backend)
+
+from flask import Flask, request, jsonify, render_template
+from email import message_from_string
+import re
+import requests
+from datetime import datetime
+
+app = Flask(__name__)
+
+# Set your IPinfo API Token here
+token = 'your_ipinfo_token_here'
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    raw_headers = request.form.get('headers')
+    if not raw_headers:
+        return jsonify({'error': 'No headers provided'}), 400
+
+    try:
+        received_lines = extract_received_headers(raw_headers)
+        ip_data = []
+        for line in received_lines:
+            ip = extract_ip(line)
+            if ip:
+                geo_info = get_ip_info(ip)
+                ip_data.append({
+                    'ip': ip,
+                    'location': geo_info.get('city', 'N/A') + ', ' + geo_info.get('country', 'N/A'),
+                    'org': geo_info.get('org', 'Unknown'),
+                    'timestamp': extract_timestamp(line)
+                })
+
+        spf, dkim, dmarc = extract_auth_results(raw_headers)
+
+        suspicious = spf != "pass" or dkim != "pass" or dmarc != "pass"
+
+        return jsonify({
+            'email_path': ip_data,
+            'spf_status': spf,
+            'dkim_status': dkim,
+            'dmarc_status': dmarc,
+            'suspicious': suspicious
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def extract_received_headers(raw_headers):
+    msg = message_from_string(raw_headers)
+    headers = msg.items()
+    return [val for key, val in headers if key.lower() == 'received']
+
+def extract_ip(header_line):
+    ip_pattern = r'\[?(\d{1,3}(?:\.\d{1,3}){3})\]?'
+    match = re.search(ip_pattern, header_line)
+    return match.group(1) if match else None
+
+def extract_timestamp(header_line):
+    try:
+        # Rough attempt to find a date string
+        date_match = re.search(r';\s*(.*)', header_line)
+        return date_match.group(1).strip() if date_match else 'Unknown'
+    except:
+        return 'Unknown'
+
+def get_ip_info(ip):
+    try:
+        response = requests.get(f'https://ipinfo.io/{ip}/json?token={token}')
+        return response.json()
+    except:
+        return {}
+
+def extract_auth_results(raw_headers):
+    spf = dkim = dmarc = "not found"
+    for line in raw_headers.splitlines():
+        line_lower = line.lower()
+        if "spf=" in line_lower:
+            spf = re.search(r'spf=(\w+)', line_lower).group(1)
+        if "dkim=" in line_lower:
+            dkim = re.search(r'dkim=(\w+)', line_lower).group(1)
+        if "dmarc=" in line_lower:
+            dmarc = re.search(r'dmarc=(\w+)', line_lower).group(1)
+    return spf, dkim, dmarc
+
+if __name__ == '__main__':
+    app.run(debug=True)
